@@ -1,5 +1,5 @@
 #property copyright "RandomBot"
-#property version "2.0"
+#property version "3.0"
 
 #include <Trade/Trade.mqh>
 
@@ -7,7 +7,6 @@
 input double InpLot = 0.08;                 // Лот
 input int InpSL_Pips = 6000;                // Stop Loss, пипсов (0 = без SL)
 input int InpTP_Pips = 200;                 // Take Profit, пипсов (0 = без TP)
-input int InpLossDistanceToAvg_Pips = 3000; // Дистанция при которой усредняться, пипсов
 
 //================== GLOBAL VARS======================================
 ulong basePositionTicket;              // Номер тикета основной позиции
@@ -31,7 +30,7 @@ void OnTick() {
         OpenRandomPosition();
     }
 
-    else if (PositionsTotal() == 1) {
+    else if (PositionsTotal() > 0) {
         ManagePosition();
     }
 }
@@ -58,17 +57,8 @@ void ManageBuyPosition() {
     double tp = (basePositionOpenPrice + ask) / 2;
     tp = NormalizeDouble(tp, _Digits);
 
-    if (MathAbs(basePositionOpenPrice - bid) >= InpLossDistanceToAvg_Pips * _Point) {
-
-        bool resOpen = trade.Buy(InpLot, _Symbol, ask, basePositionSL, tp, "AvgPosition BUY");
-        if (!resOpen) {
-            PrintFormat("Ошибка открытия AvgPosition BUY: %s", trade.ResultRetcodeDescription());
-        }
-
-        bool resModify = trade.PositionModify(basePositionTicket, basePositionSL, tp);
-        if (!resModify) {
-            PrintFormat("Ошибка модицикации BasePosition BUY: %s", trade.ResultRetcodeDescription());
-        }
+    if (MathAbs(basePositionOpenPrice - bid) >= InpTP_Pips * _Point) {
+        OpenRandomPosition();
     }
 }
 
@@ -78,17 +68,8 @@ void ManageSellPosition() {
     double tp = (basePositionOpenPrice + bid) / 2;
     tp = NormalizeDouble(tp, _Digits);
 
-    if (MathAbs(basePositionOpenPrice - ask) >= InpLossDistanceToAvg_Pips * _Point) {
-
-        bool resOpen = trade.Sell(InpLot, _Symbol, bid, basePositionSL, tp, "AvgPosition SELL");
-        if (!resOpen) {
-            PrintFormat("Ошибка открытия AvgPosition SELL: %s", trade.ResultRetcodeDescription());
-        }
-
-        bool resModify = trade.PositionModify(basePositionTicket, basePositionSL, tp);
-        if (!resModify) {
-            PrintFormat("Ошибка модицикации BasePosition SELL: %s", trade.ResultRetcodeDescription());
-        }
+    if (MathAbs(basePositionOpenPrice - ask) >= InpTP_Pips * _Point) {
+        OpenRandomPosition();
     }
 }
 
