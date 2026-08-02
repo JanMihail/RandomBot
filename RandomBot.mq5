@@ -1,95 +1,103 @@
 #property copyright "RandomBot"
-#property version "4.0"
+#property version "5.0"
 
+#include "Functions.mqh"
 #include "Structures.mqh"
+#include "UI.mqh"
 #include <Trade/Trade.mqh>
 
 //================== INPUTS ==========================================
-input double InpLot = 0.08;                  // Лот
-input int InpSL_Pips = 6000;                 // Stop Loss, пипсов (0 = без SL)
-input int InpTP_Pips = 200;                  // Take Profit, пипсов (0 = без TP)
-input int InpThresholdOneDirectionCount = 5; // >= позиций в одну сторону, закрываем всё при балансе Buy/Sell
+input int InpOptimizator = 1; // Параметр для генерации прогонов (не влияет ни на что)
+
+input group "=== ТОРГОВЛЯ ===";
+input double InpLot = 0.08; // Лот
+input int InpSL_Pips = 0;   // Stop Loss, пипсов (0 = без SL)
+input int InpTP_Pips = 200; // Take Profit, пипсов (0 = без TP)
+
+input group "=== РЕЖИМ РАНДОМА ===";
+input RandomMode RANDOM_MODE = RANDOM_MODE_FULL_BALANCE; // Режим случайности направления открытия позиций
+
+input group "=== РЕЖИМ ЗАКРЫТИЯ ПОЗИЦИЙ ===";
+input int InpThresholdOneDirectionCount = 5; // Если >= Buy&Sell, закрываем всё при достижении баланса
+
+input group "=== ВНЕШНИЙ ВИД ===";
+sinput Switch InpUiPanelEnabled = SWITCH_ON; // Вкл/Выкл UI панель
 
 //================== GLOBAL VARS======================================
-Position basePosition; // Основная позиция. От неё строится Random
-CTrade trade;          // Объект для выполнения торговых операций
+Position basePosition;         // Основная позиция. От неё строится Random
+PositionsState positionsState; // Текущее состояние позиций
+CTrade trade;                  // Объект для выполнения торговых операций
 
 int OnInit() {
     // Устанавливаем допустимое отклонение для торговли
     trade.SetDeviationInPoints(20);
 
+    // инициализация начального состояния позиций
+    positionsState.Init();
+
     // Инициализация генератора случайных чисел
     MathSrand(GetTickCount());
+
+    // Инициализация панели с состоянием счёта и позиций
+    CreatePositionsStatePanel();
 
     Print("Советник запущен!");
     return (INIT_SUCCEEDED);
 }
 
 void OnDeinit(const int reason) {
+    // Удаление панели с состоянием счёта и позиций
+    DeletePositionsStatePanel();
+
     PrintFormat("Советник остановлен! Reason: %d", reason);
 }
 
 void OnTick() {
+    // Обновление состояния позиций
+    UpdatePositionsState();
+
+    // Проверка и открытие базовой позиции если нужно
+    CheckAndOpenNewBasePositionIfNeed();
+
+    // Управление закрытием позиций
+    ManageClosePositions();
+}
+
+void CheckAndOpenNewBasePositionIfNeed() {
 
     if (PositionsTotal() == 0) {
-        OpenRandomPosition();
+        OpenBaseRandomPosition();
+        return;
     }
 
-    else {
-        ManagePosition();
-    }
-}
+    double currentPriceForClosePosition = basePosition.type == POSITION_TYPE_BUY
+                                              ? SymbolInfoDouble(_Symbol, SYMBOL_BID)
+                                              : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
 
-void OpenRandomPosition() {
-    if (MathRand() % 2 == 1) {
-        BasePositionOpenBuy();
-    } else {
-        BasePositionOpenSell();
+    // Цена ушла в +/- от основной позиции на размер TP
+    if (MathAbs(basePosition.openPrice - currentPriceForClosePosition) >= InpTP_Pips * _Point) {
+        OpenBaseRandomPosition();
     }
 }
 
-void ManagePosition() {
-    if (basePosition.orderType == ORDER_TYPE_BUY) {
-        ManageBuyPosition();
-    } else {
-        ManageSellPosition();
-    }
-
+void ManageClosePositions() {
     // Логика закрытия повисших убыточных позиций
-    PositionsState state;
-    GetPositionsState(state);
-
-    if (state.buyCount > InpThresholdOneDirectionCount && state.sellCount > InpThresholdOneDirectionCount &&
-        MathAbs(state.buyCount - state.sellCount) == 0) {
+    if (positionsState.buyCount >= InpThresholdOneDirectionCount &&
+        positionsState.sellCount >= InpThresholdOneDirectionCount &&
+        MathAbs(positionsState.buyCount - positionsState.sellCount) == 0) {
         CloseAllPositions();
     }
 }
 
-void ManageBuyPosition() {
-    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-    double tp = (basePosition.openPrice + ask) / 2;
-    tp = NormalizeDouble(tp, _Digits);
-
-    // Цена ушла в убыток от основной позиции на размер TP
-    if (MathAbs(basePosition.openPrice - bid) >= InpTP_Pips * _Point) {
-        OpenRandomPosition();
+void OpenBaseRandomPosition() {
+    if (GetRandomWeightedDirection(positionsState.buyCount, positionsState.sellCount) == POSITION_TYPE_BUY) {
+        OpenBasePositionBuy();
+    } else {
+        OpenBasePositionSell();
     }
 }
 
-void ManageSellPosition() {
-    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-    double tp = (basePosition.openPrice + bid) / 2;
-    tp = NormalizeDouble(tp, _Digits);
-
-    // Цена ушла в убыток от основной позиции на размер TP
-    if (MathAbs(basePosition.openPrice - ask) >= InpTP_Pips * _Point) {
-        OpenRandomPosition();
-    }
-}
-
-void BasePositionOpenBuy() {
+void OpenBasePositionBuy() {
     double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
     double sl = (InpSL_Pips > 0) ? ask - InpSL_Pips * _Point : 0.0;
     double tp = (InpTP_Pips > 0) ? ask + InpTP_Pips * _Point : 0.0;
@@ -101,9 +109,11 @@ void BasePositionOpenBuy() {
         basePosition.ticket = trade.ResultOrder();
         basePosition.openPrice = ask;
         basePosition.stopLoss = sl;
-        basePosition.orderType = ORDER_TYPE_BUY;
+        basePosition.type = POSITION_TYPE_BUY;
 
         PrintFormat("BasePosition=%s", basePosition.ToString());
+
+        UpdatePositionsState();
     }
 
     else {
@@ -111,7 +121,7 @@ void BasePositionOpenBuy() {
     }
 }
 
-void BasePositionOpenSell() {
+void OpenBasePositionSell() {
     double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
     double sl = (InpSL_Pips > 0) ? bid + InpSL_Pips * _Point : 0.0;
     double tp = (InpTP_Pips > 0) ? bid - InpTP_Pips * _Point : 0.0;
@@ -123,9 +133,11 @@ void BasePositionOpenSell() {
         basePosition.ticket = trade.ResultOrder();
         basePosition.openPrice = bid;
         basePosition.stopLoss = sl;
-        basePosition.orderType = ORDER_TYPE_SELL;
+        basePosition.type = POSITION_TYPE_SELL;
 
         PrintFormat("BasePosition=%s", basePosition.ToString());
+
+        UpdatePositionsState();
     }
 
     else {
@@ -134,13 +146,10 @@ void BasePositionOpenSell() {
 }
 
 /**
- * Получить текущее состояние позиций
+ * Обновить текущее состояние позиций
  */
-void GetPositionsState(PositionsState &state) {
-    state.buyCount = 0;
-    state.sellCount = 0;
-    state.farthestBuyTicket = 0;
-    state.farthestSellTicket = 0;
+void UpdatePositionsState() {
+    positionsState.Init();
 
     double farthestBuyOpenPrice = 0;
     double farthestSellOpenPrice = 0;
@@ -156,9 +165,9 @@ void GetPositionsState(PositionsState &state) {
             ENUM_POSITION_TYPE positionType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
 
             if (positionType == POSITION_TYPE_BUY) {
-                state.buyCount++;
+                positionsState.buyCount++;
             } else if (positionType == POSITION_TYPE_SELL) {
-                state.sellCount++;
+                positionsState.sellCount++;
             }
 
             // Подсчёт самой дальней от текущей цены позиции Buy/Sell
@@ -166,15 +175,26 @@ void GetPositionsState(PositionsState &state) {
 
             if (positionType == POSITION_TYPE_BUY && (farthestBuyOpenPrice == 0 || farthestBuyOpenPrice < priceOpen)) {
                 farthestBuyOpenPrice = priceOpen;
-                state.farthestBuyTicket = ticket;
+                positionsState.farthestBuyTicket = ticket;
             } else if (
                 positionType == POSITION_TYPE_SELL && (farthestSellOpenPrice == 0 || farthestSellOpenPrice > priceOpen)
             ) {
                 farthestSellOpenPrice = priceOpen;
-                state.farthestSellTicket = ticket;
+                positionsState.farthestSellTicket = ticket;
+            }
+
+            // Подсчёт суммарной прибыли по Buy/Sell
+            double totalProfit = PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
+
+            if (positionType == POSITION_TYPE_BUY) {
+                positionsState.buyProfit += totalProfit;
+            } else if (positionType == POSITION_TYPE_SELL) {
+                positionsState.sellProfit += totalProfit;
             }
         }
     }
+
+    UpdatePositionsStatePanel(positionsState);
 }
 
 /**
