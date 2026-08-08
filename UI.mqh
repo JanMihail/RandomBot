@@ -6,7 +6,7 @@ string uiObjPrefix = "PositionsStatePanel_";
 
 /** Удаление панели с состоянием счёта и позиций */
 void DeletePositionsStatePanel() {
-    if (InpUiPanelEnabled == SWITCH_OFF) {
+    if (INP_UI_PANEL_ENABLED == SWITCH_OFF) {
         return;
     }
 
@@ -15,7 +15,7 @@ void DeletePositionsStatePanel() {
 
 /** Создание панели с состоянием счёта и позиций */
 void CreatePositionsStatePanel() {
-    if (InpUiPanelEnabled == SWITCH_OFF) {
+    if (INP_UI_PANEL_ENABLED == SWITCH_OFF) {
         return;
     }
 
@@ -137,7 +137,7 @@ void CreatePositionsStatePanel() {
 
 /** Обновление панели с состоянием счёта и позиций */
 void UpdatePositionsStatePanel(const PositionsState &state) {
-    if (InpUiPanelEnabled == SWITCH_OFF) {
+    if (INP_UI_PANEL_ENABLED == SWITCH_OFF) {
         return;
     }
 
