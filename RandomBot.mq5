@@ -7,26 +7,42 @@
 #include <Trade/Trade.mqh>
 
 //================== INPUTS ==========================================
-input int InpOptimizator = 1; // Параметр для генерации прогонов (не влияет ни на что)
+input group "⚙️ Настройки торговли";
+input int INP_SL_PIPS = 0;   // Stop Loss в пипсах (0 = выключен)
+input int INP_TP_PIPS = 200; // Take Profit в пипсах (0 = выключен)
 
-input group "=== ТОРГОВЛЯ ===";
-input double InpLot = 0.08; // Лот
-input int InpSL_Pips = 0;   // Stop Loss, пипсов (0 = без SL)
-input int InpTP_Pips = 200; // Take Profit, пипсов (0 = без TP)
+input group "💰 Мани-менеджмент";
+input double INP_LOT = 0.08;               // Базовый торговый лот
+input double INP_LOT_PER_BALANCE = 1000.0; // Баланс на базовый лот (0 = фиксированный лот)
+// input int INP_GRID_LOT_STEP = 5;           // Увеличивать лот каждые N позиций (0 = выключено)
+// input double INP_GRID_LOT_ADD = 0.1;       // Прибавка к лоту за каждый шаг N позиций
 
-input group "=== РЕЖИМ РАНДОМА ===";
-input RandomMode RANDOM_MODE = RANDOM_MODE_FULL_BALANCE; // Режим случайности направления открытия позиций
+input group "🔴 Контроль рисков (Защита)";
+input double INP_MAX_DRAWDOWN_PERCENT = 50.0; // Макс. допустимая просадка в %
+input int INP_THRESHOLD_ONE_DIRECTION = 5;    // Порог позиций одного направления для закрытия по балансу
 
-input group "=== РЕЖИМ ЗАКРЫТИЯ ПОЗИЦИЙ ===";
-input int InpThresholdOneDirectionCount = 5; // Если >= Buy&Sell, закрываем всё при достижении баланса
+input group "🎯 Контроль прибыли и цели";
+input double INP_EQUITY_PROFIT_TARGET_PERCENT = 2.0; // Фиксация прибыли при приросте Equity в % (0 = выкл.)
+input double INP_TARGET_DEPOSIT_PROFIT_KOEF = 3.0;   // Целевой множитель баланса до полной остановки (Иксы)
 
-input group "=== ВНЕШНИЙ ВИД ===";
-sinput Switch InpUiPanelEnabled = SWITCH_ON; // Вкл/Выкл UI панель
+input group "🎲 Алгоритм выбора направления";
+input RandomMode RANDOM_MODE = RANDOM_MODE_FULL_BALANCE; // Алгоритм случайного выбора направления
+input double INP_MIN_PROBABILITY = 0.0;                  // Минимальный порог вероятности (для взвешенных режимов)
+input double INP_MAX_PROBABILITY = 1.0;                  // Максимальный порог вероятности (для взвешенных режимов)
+
+input group "📈 Графическая панель";
+sinput Switch INP_UI_PANEL_ENABLED = SWITCH_ON; // Отображение информационной UI панели
+
+input group "🔧 Служебные настройки";
+input int INP_OPTIMIZATOR = 1; // Генератор прогонов (не влияет на логику)
 
 //================== GLOBAL VARS======================================
 Position basePosition;         // Основная позиция. От неё строится Random
 PositionsState positionsState; // Текущее состояние позиций
 CTrade trade;                  // Объект для выполнения торговых операций
+
+double startAccountBalance; // Начальный баланс счёта при старте советника (не меняется)
+double accountBalance;      // Баланс счёта после фиксации прибыли/убытка
 
 int OnInit() {
     // Устанавливаем допустимое отклонение для торговли
@@ -40,6 +56,9 @@ int OnInit() {
 
     // Инициализация панели с состоянием счёта и позиций
     CreatePositionsStatePanel();
+
+    startAccountBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+    accountBalance = startAccountBalance;
 
     Print("Советник запущен!");
     return (INIT_SUCCEEDED);
@@ -59,8 +78,11 @@ void OnTick() {
     // Проверка и открытие базовой позиции если нужно
     CheckAndOpenNewBasePositionIfNeed();
 
-    // Управление закрытием позиций
-    ManageClosePositions();
+    // Применить управление рисками
+    ApplyRiskManagement();
+
+    // Применить управление прибылью
+    ApplyProfitManagement();
 }
 
 void CheckAndOpenNewBasePositionIfNeed() {
@@ -75,17 +97,74 @@ void CheckAndOpenNewBasePositionIfNeed() {
                                               : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
 
     // Цена ушла в +/- от основной позиции на размер TP
-    if (MathAbs(basePosition.openPrice - currentPriceForClosePosition) >= InpTP_Pips * _Point) {
+    if (MathAbs(basePosition.openPrice - currentPriceForClosePosition) >= INP_TP_PIPS * _Point) {
         OpenBaseRandomPosition();
     }
 }
 
-void ManageClosePositions() {
-    // Логика закрытия повисших убыточных позиций
-    if (positionsState.buyCount >= InpThresholdOneDirectionCount &&
-        positionsState.sellCount >= InpThresholdOneDirectionCount &&
+void ApplyRiskManagement() {
+    ApplyThresholdOneDirectionRiskManagement();
+    ApplyMaxDrawdownRiskManagement();
+}
+
+void ApplyProfitManagement() {
+    ApplyEquityTargetPercentProfitManagement();
+    ApplyTargetDepositProfitManagement();
+}
+
+/** Логика закрытия повисших убыточных позиций в одном направлении при превышении порога */
+void ApplyThresholdOneDirectionRiskManagement() {
+    if (positionsState.buyCount >= INP_THRESHOLD_ONE_DIRECTION &&
+        positionsState.sellCount >= INP_THRESHOLD_ONE_DIRECTION &&
         MathAbs(positionsState.buyCount - positionsState.sellCount) == 0) {
         CloseAllPositions();
+        accountBalance = AccountInfoDouble(ACCOUNT_EQUITY);
+    }
+}
+
+/** Логика фиксации убытка при достижении макс. допустимой просадки */
+void ApplyMaxDrawdownRiskManagement() {
+    double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+
+    if (accountBalance == 0.0) {
+        return;
+    }
+
+    double lossPercent = -(equity - accountBalance) / accountBalance * 100.0;
+
+    if (lossPercent >= INP_MAX_DRAWDOWN_PERCENT) {
+        CloseAllPositions();
+        accountBalance = equity;
+    }
+}
+
+/** Логика фиксации прибыли при приросте Equity в % */
+void ApplyEquityTargetPercentProfitManagement() {
+    if (INP_EQUITY_PROFIT_TARGET_PERCENT == 0.0) {
+        return;
+    }
+
+    double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+
+    if (accountBalance == 0.0) {
+        return;
+    }
+
+    double profitPercent = (equity - accountBalance) / accountBalance * 100.0;
+
+    if (profitPercent >= INP_EQUITY_PROFIT_TARGET_PERCENT) {
+        CloseAllPositions();
+        accountBalance = equity;
+    }
+}
+
+/** Логика фиксации прибыли при достижении финальных иксов и отключение советника */
+void ApplyTargetDepositProfitManagement() {
+    double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+
+    if (equity / startAccountBalance >= INP_TARGET_DEPOSIT_PROFIT_KOEF) {
+        CloseAllPositions();
+        ExpertRemove();
     }
 }
 
@@ -97,14 +176,31 @@ void OpenBaseRandomPosition() {
     }
 }
 
+double CalcLot() {
+    if (INP_LOT_PER_BALANCE == 0.0) {
+        return INP_LOT;
+    }
+
+    double lotStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+    double lot = accountBalance / INP_LOT_PER_BALANCE * INP_LOT;
+    double normalizedLot = MathRound(lot / lotStep) * lotStep;
+
+    double lotMin = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+    double lotMax = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+
+    normalizedLot = MathMax(normalizedLot, lotMin);
+    normalizedLot = MathMin(normalizedLot, lotMax);
+    return normalizedLot;
+}
+
 void OpenBasePositionBuy() {
     double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-    double sl = (InpSL_Pips > 0) ? ask - InpSL_Pips * _Point : 0.0;
-    double tp = (InpTP_Pips > 0) ? ask + InpTP_Pips * _Point : 0.0;
+    double sl = (INP_SL_PIPS > 0) ? ask - INP_SL_PIPS * _Point : 0.0;
+    double tp = (INP_TP_PIPS > 0) ? ask + INP_TP_PIPS * _Point : 0.0;
     sl = (sl > 0) ? NormalizeDouble(sl, _Digits) : 0.0;
     tp = (tp > 0) ? NormalizeDouble(tp, _Digits) : 0.0;
 
-    if (trade.Buy(InpLot, _Symbol, ask, sl, tp, "BasePosition BUY")) {
+    if (trade.Buy(CalcLot(), _Symbol, ask, sl, tp, "BasePosition BUY")) {
 
         basePosition.ticket = trade.ResultOrder();
         basePosition.openPrice = ask;
@@ -118,17 +214,23 @@ void OpenBasePositionBuy() {
 
     else {
         PrintFormat("Ошибка открытия BasePosition BUY: %s", trade.ResultRetcodeDescription());
+
+        // Если код ошибки not enougn money, выключаем советник
+        if (trade.ResultRetcode() == 10019) {
+            CloseAllPositions();
+            ExpertRemove();
+        }
     }
 }
 
 void OpenBasePositionSell() {
     double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-    double sl = (InpSL_Pips > 0) ? bid + InpSL_Pips * _Point : 0.0;
-    double tp = (InpTP_Pips > 0) ? bid - InpTP_Pips * _Point : 0.0;
+    double sl = (INP_SL_PIPS > 0) ? bid + INP_SL_PIPS * _Point : 0.0;
+    double tp = (INP_TP_PIPS > 0) ? bid - INP_TP_PIPS * _Point : 0.0;
     sl = (sl > 0) ? NormalizeDouble(sl, _Digits) : 0.0;
     tp = (tp > 0) ? NormalizeDouble(tp, _Digits) : 0.0;
 
-    if (trade.Sell(InpLot, _Symbol, bid, sl, tp, "BasePosition SELL")) {
+    if (trade.Sell(CalcLot(), _Symbol, bid, sl, tp, "BasePosition SELL")) {
 
         basePosition.ticket = trade.ResultOrder();
         basePosition.openPrice = bid;
@@ -142,6 +244,12 @@ void OpenBasePositionSell() {
 
     else {
         PrintFormat("Ошибка открытия BasePosition SELL: %s", trade.ResultRetcodeDescription());
+
+        // Если код ошибки not enougn money, выключаем советник
+        if (trade.ResultRetcode() == 10019) {
+            CloseAllPositions();
+            ExpertRemove();
+        }
     }
 }
 
